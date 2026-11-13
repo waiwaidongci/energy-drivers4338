@@ -1,0 +1,1 @@
+<script setup lang="ts">import {statuses} from '../../constants/enums';defineProps<{status:string}>();</script><template><span class="status" :class="status">{{statuses[status]||status}}</span></template>

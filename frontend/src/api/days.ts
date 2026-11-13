@@ -1,0 +1,1 @@
+import {request} from './client';import type {Day} from '../types/domain';export const getDays=(id:number,building='',offset=0)=>request<{total:number;rows:Day[]}>(`/days?dataset_id=${id}&building=${encodeURIComponent(building)}&offset=${offset}&limit=20`);

@@ -1,0 +1,75 @@
+name: ${COMPOSE_PROJECT_NAME:-energy-drivers}
+services:
+  db:
+    image: mysql:8.0
+    container_name: ${COMPOSE_PROJECT_NAME:-energy-drivers}-db
+    environment:
+      MYSQL_ROOT_PASSWORD: ${DB_PASSWORD:-energy-demo-local}
+      MYSQL_DATABASE: energy
+    ports: ["${DB_PORT:-17717}:3306"]
+    volumes: ["db-data:/var/lib/mysql"]
+    healthcheck:
+      test: ["CMD-SHELL", "mysqladmin ping -h localhost -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+  redis:
+    image: redis:7-alpine
+    container_name: ${COMPOSE_PROJECT_NAME:-energy-drivers}-redis
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  backend:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-energy-drivers}-backend
+    environment: &environment
+      DATABASE_URL: mysql+pymysql://root:${DB_PASSWORD:-energy-demo-local}@db:3306/energy
+      REDIS_URL: redis://redis:6379/0
+      JWT_SECRET: ${JWT_SECRET:-local-energy-drivers-change-this-before-hosting}
+      SEED_DEMO: ${SEED_DEMO:-true}
+      OMP_NUM_THREADS: 1
+      OPENBLAS_NUM_THREADS: 1
+    ports: ["${BACKEND_PORT:-19217}:8000"]
+    volumes: ["analysis-artifacts:/artifacts"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 5s
+      timeout: 4s
+      retries: 30
+  worker:
+    build: ./backend
+    container_name: ${COMPOSE_PROJECT_NAME:-energy-drivers}-worker
+    command: ["python", "-m", "src.worker"]
+    environment: *environment
+    volumes: ["analysis-artifacts:/artifacts"]
+    depends_on:
+      db: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "python", "-c", "from pathlib import Path; import time; p=Path('/tmp/heartbeat'); assert p.exists() and time.time()-p.stat().st_mtime<30"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  frontend:
+    build: ./frontend
+    container_name: ${COMPOSE_PROJECT_NAME:-energy-drivers}-frontend
+    ports: ["${FRONTEND_PORT:-18217}:80"]
+    depends_on:
+      backend: {condition: service_healthy}
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+volumes:
+  db-data:
+  redis-data:
+  analysis-artifacts:

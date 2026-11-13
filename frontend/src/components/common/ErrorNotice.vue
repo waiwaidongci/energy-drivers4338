@@ -1,0 +1,1 @@
+<script setup lang="ts">defineProps<{message:string}>();defineEmits(['retry']);</script><template><div v-if="message" role="alert" class="error-notice">{{message}} <button class="text-button" @click="$emit('retry')">重试</button></div></template>
