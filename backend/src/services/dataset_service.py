@@ -5,12 +5,14 @@ from pydantic import ValidationError
 from src.models import BuildingDataset,BuildingDay
 from src.schemas.day import DayInput
 from src.services.splitting import split_buildings
+from src.services.imputation import missing_summary
 from src.constants.enums import FEATURES
 def list_datasets(db):
     datasets=db.scalars(select(BuildingDataset).order_by(BuildingDataset.id)).all();result=[]
     for d in datasets:
         days=db.scalars(select(BuildingDay).where(BuildingDay.dataset_id==d.id).order_by(BuildingDay.building_code,BuildingDay.day)).all();split=split_buildings([{'id':x.id,'building_code':x.building_code} for x in days])
-        result.append({'id':d.id,'name':d.name,'source_file':d.source_file,'note':d.note,'row_count':len(days),'building_count':len(split['train_buildings'])+len(split['test_buildings']),'locked_config':d.locked_config,'evaluation_released':d.evaluation_released,'train_buildings':split['train_buildings'],'test_buildings':split['test_buildings']})
+        missing=missing_summary([{'id':x.id,**{f:getattr(x,f) for f in FEATURES}} for x in days])
+        result.append({'id':d.id,'name':d.name,'source_file':d.source_file,'note':d.note,'row_count':len(days),'building_count':len(split['train_buildings'])+len(split['test_buildings']),'missing_rows':missing['rows_with_missing'],'missing_cells':missing['cells'],'locked_config':d.locked_config,'evaluation_released':d.evaluation_released,'train_buildings':split['train_buildings'],'test_buildings':split['test_buildings']})
     return result
 def create_dataset(db,data):
     if db.scalar(select(BuildingDataset).where(BuildingDataset.name==data.name)):raise HTTPException(409,'数据集名称已存在')
@@ -21,7 +23,8 @@ def create_dataset(db,data):
     try:split_buildings([{'id':i,'building_code':r.building_code} for i,r in enumerate(rows)])
     except ValueError as exc:raise HTTPException(422,str(exc))
     def digest(items):
-        normalized=sorted([[r.building_code,r.day,*[float(getattr(r,f)) for f in (*FEATURES,'energy_kwh')]] for r in items],key=lambda r:(r[0],r[1]))
+        def cell(value):return None if value is None else float(value)
+        normalized=sorted([[r.building_code,r.day,*[cell(getattr(r,f)) for f in (*FEATURES,'energy_kwh')]] for r in items],key=lambda r:(r[0],r[1]))
         return hashlib.sha256(json.dumps(normalized,separators=(',',':'),allow_nan=False).encode()).hexdigest()
     incoming=digest(rows)
     for prior in db.scalars(select(BuildingDataset)).all():

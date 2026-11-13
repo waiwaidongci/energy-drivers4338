@@ -30,7 +30,7 @@ JWT有效8小时，带盐PBKDF2-SHA256密码；独立审计/错误中间件，�
 1. 09:00 周山登录，核对`ls-energy-days.csv`的12栋×90日=1080行。
 2. 09:05 查看训练/封存分组；LS-03、LS-09、LS-12为封存楼宇，其能耗目标在首次评估公开前隐藏。
 3. 09:10 选择7个特征，α=[.05,.5,5,25]、l1_ratio=[.2,.6,.9]、20次置换，提交首次研究。
-4. 09:12 系统锁定数据集方案，worker在9栋训练楼宇内作3折GroupKFold比较，每折单独学习StandardScaler。
+4. 09:12 系统锁定数据集方案，worker在9栋训练楼宇内作3折GroupKFold比较，每折单独学习补值中位数与StandardScaler。
 5. 09:15 用胜出配置重拟合全部810个训练楼宇日，再读取270个封存楼宇日最终成绩。
 6. 09:20 核对三栋封存楼宇散点、原单位/标准化系数、每项特征置换ΔMAE及20次分布。
 7. 09:30 选“运行时长”等线索，提出运行排程和计量边界复核假设，写明两周独立观察计划。
@@ -40,13 +40,19 @@ JWT有效8小时，带盐PBKDF2-SHA256密码；独立审计/错误中间件，�
 
 ## 分组、封存与配置锁
 
-- 原始行以`(dataset_id,building_code,day)`唯一；至少8栋、每栋至少6天，总计48–5000行。日期YYYY-MM-DD；七特征有限且在schema规定量程内，能耗目标为正。
+- 原始行以`(dataset_id,building_code,day)`唯一；至少8栋、每栋至少6天，总计48–5000行。日期YYYY-MM-DD；七特征在schema规定量程内，能耗目标为正。特征单元格留空表示缺测并保存为NULL；能耗目标留空直接拒绝（422），不能补值。
 - 按排序楼宇代码用seed97排列，最后约25%楼宇（至少2栋）封存，其余训练；12栋时为9/3分组。模型不会把同楼日期拆到训练与封存两侧。
-- 训练组内部用3折GroupKFold，整栋楼进入训练或验证；保存每折楼宇、训练/验证行ID和实际拟合的scaler均值/尺度。每折Pipeline均重新fit，最终StandardScaler也只fit全部训练楼宇。
+- 训练组内部用3折GroupKFold，整栋楼进入训练或验证；保存每折楼宇、训练/验证行ID、实际拟合的scaler均值/尺度及该折补值。每折Pipeline均重新fit补值、scaler与回归，最终模型也只fit全部训练楼宇；封存评估沿用最终模型的补值。
 - 首次提交用数据库行锁原子保留特征、α/l1候选及重复次数。之后不同配置返回409，只允许同配置复算。源数据页在最终选模完成前隐藏封存楼宇目标，成功提交最终结果时再公开。
 - 完全相同的楼宇日内容即使改数据集名称也不能重新导入（409），避免直接重导旧数据重置方案。新研究方案应使用真正新采集且尚未参与评估的楼宇；系统不能证明上游数据从未被人查看或跨来源改写。
 
 按楼宇隔离、Pipeline学习范围与避免测试集参与选择的做法参照[scikit-learn数据泄漏指南](https://scikit-learn.org/stable/common_pitfalls.html)及[GroupKFold官方说明](https://scikit-learn.org/stable/modules/generated/sklearn.model_selection.GroupKFold.html)。本项目固定使用scikit-learn1.5.2，不调用后续版本新增的shuffle参数。
+
+## 特征缺测与补值
+
+特征缺测（CSV空单元格）保留为NULL入库，不整批拒绝、不填零。Pipeline第一步`MedianImputer`用该阶段训练行观测到的中位数补齐：每折只用自己的折内训练行，最终模型用全部训练楼宇，二者互不借用验证或封存取值。若某折的训练行对某特征完全没有观测（折内全空），回退到锁定训练范围（全部训练楼宇）的中位数，并在该折记录`impute_fallback`；这仍只用训练阶段数据。训练范围内某特征全空时在首次锁方案前拒绝（422），不给出成绩也不消耗方案锁。
+
+封存特征缺测按最终模型补值参与评估与置换，只影响最终成绩；封存侧的缺测状态不进入补值、候选成绩、胜出配置或训练选择指纹。数据页与驱动解释页展示各分组缺测行/格数、每折与最终补值、折内回退以及封存点缺测特征；研究首页的封存摘要显示封存缺测行/格。旧数据（无缺测）复算结果与指纹不变。
 
 ## ElasticNet与解释口径
 
@@ -62,9 +68,9 @@ ElasticNet在标准化X上最小化`||y−Xw||²/(2n) + α*l1_ratio*||w||₁ + �
 
 ## 失败态与复算
 
-常量训练特征、常量训练目标、楼宇不足、每楼天数不足、非有限训练/封存值、非法特征/候选、模型未收敛、数据重复均明确拒绝或保存failed原因。常量特征在首次锁定前校验，失败不会消耗方案锁。
+常量训练特征、常量训练目标、楼宇不足、每楼天数不足、非有限训练/封存值、训练范围内特征全空、能耗目标缺测、非法特征/候选、模型未收敛、数据重复均明确拒绝或保存failed原因。常量特征与全空特征在首次锁定前校验，失败不会消耗方案锁。
 
-保存三类核验材料：train/test楼宇与行ID、每折训练/验证楼宇与行ID、每折及最终scaler均值/尺度。训练选择SHA256只包含训练观测、拆组与配置；完整输入SHA256另包含所有源数据和封存目标。固定cyclic求解、seed97与稳定排序便于复算。数值测量与DriverFinding标量使用MySQL DOUBLE，重复分布为JSON双精度，保留一致的持久化精度。
+保存三类核验材料：train/test楼宇与行ID、每折训练/验证楼宇与行ID、每折及最终scaler均值/尺度，另存每折与最终补值。训练选择SHA256只包含训练观测、拆组与配置（不含封存侧特征缺测）；完整输入SHA256另包含所有源数据和封存目标。固定cyclic求解、seed97与稳定排序便于复算。数值测量与DriverFinding标量使用MySQL DOUBLE，重复分布为JSON双精度，保留一致的持久化精度。
 
 ## 六页、五实体和共享代码
 
@@ -80,11 +86,11 @@ BuildingDataset、BuildingDay、ModelRun、DriverFinding、RetrofitHypothesis五
 |---|---|
 | 前端 | Vue3.5.45、TypeScript、Pinia、Vue Router、Vite6.4.6、Nginx1.27 |
 | 后端 | Python3.11、FastAPI、SQLAlchemy、PyMySQL、PyJWT |
-| 科学计算 | NumPy、scikit-learn1.5.2 Pipeline/StandardScaler/ElasticNet/GroupKFold |
+| 科学计算 | NumPy、scikit-learn1.5.2 Pipeline/中位数补值/StandardScaler/ElasticNet/GroupKFold |
 | worker | 单Python消费者；MySQL任务状态为事实源，Redis唤醒；恢复queued/running |
 | 数据服务 | MySQL8.0、Redis7 AOF |
 
-五服务恰好frontend/backend/worker/db/redis，每个healthcheck真实检测。backend等db/redis；worker再等backend；frontend等backend。命名卷为数据库、Redis、后端/worker共享产物；当前结果在DB，交付CSV实时生成，共享卷预留扩展。`backend/migrations/README.md`说明metadata初始化v1与自然键，没有生产schema升级工具。
+五服务恰好frontend/backend/worker/db/redis，每个healthcheck真实检测。backend等db/redis；worker再等backend；frontend等backend。命名卷为数据库、Redis、后端/worker共享产物；当前结果在DB，交付CSV实时生成，共享卷预留扩展。`backend/migrations/README.md`说明metadata初始化v1、自然键与特征列可空的兼容升级，没有生产schema升级工具。
 
 目录：`backend/src/{routes,controllers,services,models,schemas,middlewares,utils,constants,config}`、`backend/scripts/seed_demo.py`；`frontend/src/{api,stores,types,components/common,hooks,pages,router,utils,constants}`。
 
